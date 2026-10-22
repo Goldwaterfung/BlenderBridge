@@ -1,8 +1,14 @@
 # Blender Bridge
 
-[English](README.md) | [繁體中文](README.zh-TW.md)
+[English](README.md) | [繁體中文](README.zh-HK.md)
 
 Blender Bridge 可將 Blender 連接至 Unity 編輯器，提供即時網格與材質預覽，也能將選取的靜態網格匯出為 FBX 檔案至 Unity 專案。Unity 匯入 FBX 後，可將其烘焙成可重複使用、包含材質的 Prefab。
+
+## 示範影片
+
+<video src="images/showcase.mp4" controls width="100%">
+  <a href="images/showcase.mp4">Blender Bridge 示範影片</a>
+</video>
 
 ## 系統需求
 
@@ -102,5 +108,6 @@ Unity 預設監聽連接埠 `8191`，輸出資料夾為 `Assets/Art/Blender`。�
 
 - `UnityBlenderBridge/` — Unity 執行階段與編輯器整合。
 - `BlenderBridge-addon.zip` — 可安裝的 Blender 外掛。
+- `images/showcase.mp4` — Blender Bridge 示範影片。
 - `images/` — 本指南使用的安裝與操作截圖。
 - `blender_bridge/LICENSE` — MIT 授權條款。
