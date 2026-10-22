@@ -109,6 +109,7 @@ namespace BlenderBridge.Editor
                         BridgeServer.RequestResyncFromWindow();
                 }
             }
+
         }
     }
 }

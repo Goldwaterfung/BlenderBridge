@@ -144,6 +144,38 @@ if bpy is not None:
             return {"FINISHED"}
 
 
+    class BLENDERBRIDGE_OT_generate_lods(bpy.types.Operator):
+        bl_idname = "blender_bridge.generate_lods"
+        bl_label = "Automatic LOD"
+        bl_description = "Generate selectable LOD candidates and bake their modifiers without assigning them"
+
+        def execute(self, context: object) -> set[str]:
+            from .lod import DEFAULT_TRIANGLE_CAPS, generate_lod_candidates
+
+            root = context.view_layer.objects.active
+            if root is None or getattr(root, "type", None) != "MESH":
+                self.report({"ERROR"}, "Select a mesh object to use as the LOD set source.")
+                return {"CANCELLED"}
+            scene = context.scene
+            caps = tuple(
+                getattr(scene, f"blender_bridge_lod{level}_triangle_cap", DEFAULT_TRIANGLE_CAPS[level])
+                for level in range(4)
+            )
+            try:
+                candidates = generate_lod_candidates(root, scene, caps, context.evaluated_depsgraph_get())
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                self.report({"ERROR"}, str(exc))
+                return {"CANCELLED"}
+            if not candidates:
+                self.report({"INFO"}, "The evaluated source fits every cap; no reduced candidates were needed.")
+            else:
+                self.report(
+                    {"INFO"},
+                    "Generated candidates: " + ", ".join(candidate.name for candidate in candidates),
+                )
+            return {"FINISHED"}
+
+
     class BLENDERBRIDGE_PT_panel(bpy.types.Panel):
         bl_label = "Blender Bridge"
         bl_idname = "BLENDERBRIDGE_PT_panel"
@@ -185,6 +217,21 @@ if bpy is not None:
 
             layout.separator()
             layout.label(text="Bake track (static meshes only)")
+            active = context.view_layer.objects.active
+            if active is not None and getattr(active, "type", None) == "MESH":
+                lod_box = layout.box()
+                lod_box.label(text=f"LOD set: {active.name}")
+                for level in range(4):
+                    lod_box.prop(active, f"blender_bridge_lod{level}", text=f"LOD{level}")
+                caps_box = lod_box.column(align=True)
+                caps_box.label(text="Maximum triangles per level")
+                for level in range(4):
+                    caps_box.prop(
+                        scene,
+                        f"blender_bridge_lod{level}_triangle_cap",
+                        text=f"LOD{level}",
+                    )
+                lod_box.operator(BLENDERBRIDGE_OT_generate_lods.bl_idname, icon="MOD_DECIM")
             root_row = layout.row()
             root_row.enabled = False
             root_row.prop(scene, "blender_bridge_project_root")
@@ -197,6 +244,7 @@ if bpy is not None:
     _CLASSES = (
         BLENDERBRIDGE_OT_toggle_live_updates,
         BLENDERBRIDGE_OT_bake,
+        BLENDERBRIDGE_OT_generate_lods,
         BLENDERBRIDGE_PT_panel,
     )
 
@@ -226,6 +274,29 @@ def register() -> None:
         max=65535,
         update=_update_settings,
     )
+    from .lod import DEFAULT_TRIANGLE_CAPS
+
+    for level, default_cap in enumerate(DEFAULT_TRIANGLE_CAPS):
+        setattr(
+            bpy.types.Scene,
+            f"blender_bridge_lod{level}_triangle_cap",
+            bpy.props.IntProperty(
+                name=f"LOD{level} Triangle Cap",
+                description=f"Maximum evaluated triangles for LOD{level}",
+                default=default_cap,
+                min=1,
+            ),
+        )
+        setattr(
+            bpy.types.Object,
+            f"blender_bridge_lod{level}",
+            bpy.props.PointerProperty(
+                name=f"LOD{level} Mesh",
+                description=f"Mesh assigned to LOD{level} for this source/root",
+                type=bpy.types.Object,
+                poll=lambda _self, obj: getattr(obj, "type", None) == "MESH",
+            ),
+        )
     bpy.types.Scene.blender_bridge_scope = bpy.props.EnumProperty(
         name="Export Scope",
         items=(
@@ -290,5 +361,12 @@ def unregister() -> None:
     ):
         if hasattr(bpy.types.Scene, property_name):
             delattr(bpy.types.Scene, property_name)
+    for level in range(4):
+        scene_property = f"blender_bridge_lod{level}_triangle_cap"
+        object_property = f"blender_bridge_lod{level}"
+        if hasattr(bpy.types.Scene, scene_property):
+            delattr(bpy.types.Scene, scene_property)
+        if hasattr(bpy.types.Object, object_property):
+            delattr(bpy.types.Object, object_property)
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)

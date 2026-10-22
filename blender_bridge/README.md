@@ -1,0 +1,10 @@
+If you need to build the addon, please run command:
+```
+.\.venv\Scripts\python.exe -c "import zipfile; from pathlib import Path; files=sorted(Path('blender_bridge').glob('*.py')); z=zipfile.ZipFile('BlenderBridge-addon.zip','w',zipfile.ZIP_DEFLATED); [z.write(f, f.as_posix()) for f in files]; z.close()"
+```
+
+For FBX baking, start Live Updates and connect Blender to the Unity Editor first. Unity reports its active project root over the bridge, and Blender requests it again before each bake. Blender exports to the relative Output Path under that project's `Assets` folder. The default is `Assets/Art/Blender/Environment`; after export, Blender opens the output folder. Keep custom output paths inside the Unity Bridge Settings asset's configured output folder if you also want to use Unity's explicit Prefab bake step.
+
+To bake LODs, make the source/root mesh active and assign meshes in its LOD0–LOD3 fields. The Automatic LOD button creates persistent candidate objects but does not assign them; choose the candidates you want in those fields. Generated candidates bake their evaluated modifier stack, including Decimate, into private mesh data; the source object remains unchanged. The four editable triangle caps are validated before generation and export. Blender exports assigned levels in a namespaced hierarchy and writes a matching `<name>.fbx.lod.json` sidecar. Unity validates the sidecar and imported triangle counts, then creates an `LODGroup` for sets with multiple levels during the explicit Prefab bake. A single emitted level remains a normal static renderer. The provisional transition defaults are 0.6 / 0.3 / 0.1 and can be tuned in the Blender Bridge Settings asset.
+
+Blender Bridge does not compress textures or manage compression settings. In Unity, select the texture assets you want to process in the Project window and use Unity's built-in Texture Importer Inspector to choose compression quality and Crunch Compression, then apply the changes. Texture import and compression remain under the user's Unity workflow and do not block the explicit Prefab bake.

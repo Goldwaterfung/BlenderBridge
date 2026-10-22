@@ -65,6 +65,8 @@ Blender Bridge 可將 Blender 連接至 Unity 編輯器，提供即時網格與�
 
 ## 匯出 FBX 並建立 Prefab
 
+![Open Unity Assets menu](images/bake_fbx_to_prefab.jpg)
+
 1. 依照上述步驟連線至 Unity，並啟用即時更新。
 2. 在 Blender 中選取要匯出的靜態網格物件。在 Blender Bridge 面板中，將 **Output Path** 設定為連線中 Unity 專案 `Assets` 資料夾下的路徑。預設值為 `Art/Blender/Environment`。
 3. 可選擇輸入 **File Name**；留白時會自動依名稱產生檔名。
@@ -73,12 +75,25 @@ Blender Bridge 可將 Blender 連接至 Unity 編輯器，提供即時網格與�
 
 Unity 烘焙程序會在已設定的 Blender Bridge 輸出資料夾中建立 Prefab 與材質。此匯出流程支援靜態網格，不會烘焙動畫。
 
+## 將 LOD 烘焙成 Unity Prefab
+
+Blender 會將 LOD 網格匯出為 FBX 階層，並寫入相應的 `.fbx.lod.json` sidecar。單純匯入 FBX **不會**自動加入 Unity 的 `LODGroup` 元件。請使用 Unity Prefab 烘焙功能驗證 LOD 資料並組成元件：
+
+1. 在 Blender 中，將來源／根網格設為作用中物件，並在其 **LOD0–LOD3** 欄位指派要使用的網格。每個指派網格都應比上一級細節更少，並與上一級在空間位置上對齊。只有已指派的級別會匯出。
+2. 啟用即時更新、設定輸出路徑，然後依照上文按一下 **Bake to Unity**。請將產生的 `.fbx.lod.json` sidecar 保留在 FBX 旁邊。
+3. 在 Unity 的 **Project** 視窗選取已匯入的 FBX 資產，然後選擇 **Assets > Blender Bridge > Bake FBX To Prefab**。執行此命令時，不要選取 Hierarchy 中的場景物件。
+4. 使用輸出資料夾 `Baked` 子資料夾中的 Prefab。Prefab 內的空物件 `<來源名稱>_LODGroup` 會附有 `LODGroup` 元件；其 LOD 子物件會提供各級所需的 Renderer。將此 Prefab 拖入場景即可。
+
+使用 Prefab 烘焙功能時，無須手動新增或設定元件。若直接使用已匯入的 FBX 階層而沒有烘焙 Prefab，名稱為 `<來源名稱>_LODGroup` 的物件只是一個 Transform；請自行新增 `LODGroup` 元件，並指派各級的 Renderer。若只指派一個級別，該網格會保持為一般靜態 Renderer，不會建立 `LODGroup`。
+
+LOD 切換依據螢幕相對尺寸，而不是固定的相機距離。暫定預設值為 LOD0、LOD1、LOD2 之後分別使用 `0.6`、`0.3`、`0.1`；可在 Blender Bridge Settings 資產中調整，並以實際相機與資產測試。
+
 ## 功能限制
 
 - 場景與資產更新只會由 Blender 傳送至 Unity；Unity 端的場景編輯不會同步回 Blender。Unity 可以傳送橋接控制要求，例如要求重新同步，但這不代表支援雙向編輯。
 - 每個 Unity 編輯器執行個體同時只能接受一個 Blender 連線。
 - FBX 烘焙僅支援靜態網格。不支援骨架綁定或動畫網格、形狀鍵，以及具有骨架、曲線或粒子系統修改器的網格。烘焙前請先儲存 Blender 檔案。
-- Blender 的 **Bake to Unity** 功能只會匯出 FBX；Unity 必須另外匯入 FBX，並執行 **Bake FBX To Prefab**，才能建立 Prefab 與材質。
+- Blender 的 **Bake to Unity** 功能只會匯出 FBX；Unity 必須另外匯入 FBX，並執行 **Bake FBX To Prefab**，才能建立 Prefab 與材質（並組成支援的多級 LODGroup）。
 
 ## 未來規劃
 

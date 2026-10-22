@@ -16,6 +16,19 @@ namespace BlenderBridge.Editor
         private const string ExporterVersion = "Blender Bridge FBX v1";
         private const int MaximumAssetNameLength = 120;
 
+        internal sealed class LodLevelPlan
+        {
+            public int Level;
+            public string NodeName;
+            public float Transition;
+        }
+
+        internal sealed class LodGroupPlan
+        {
+            public string GroupName;
+            public LodLevelPlan[] Levels;
+        }
+
         [MenuItem("Assets/Blender Bridge/Bake FBX To Prefab", false, 2100)]
         private static void BakeSelectedFbx()
         {
@@ -79,18 +92,25 @@ namespace BlenderBridge.Editor
                 throw new InvalidDataException($"Unity did not import '{sourceAssetPath}' as a model.");
 
             ValidateStaticModel(importedModel);
+            List<LodGroupPlan> lodPlans = PreflightLods(sourceAssetPath, importedModel);
             ValidateDependencies(sourceAssetPath);
-            ConfigureReferencedTextureColorSpaces(sourceAssetPath, outputFolder, importedModel);
-
-            AssetDatabase.ImportAsset(
+            List<BlenderUv0Preflight.ValidationResult> uv0Results = BlenderUv0Preflight.ValidateModel(
                 sourceAssetPath,
-                ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
-            importedModel = AssetDatabase.LoadAssetAtPath<GameObject>(sourceAssetPath);
-            if (importedModel == null)
-                throw new InvalidDataException($"The FBX '{sourceAssetPath}' failed to reimport after texture configuration.");
-
-            ValidateStaticModel(importedModel);
-            ValidateDependencies(sourceAssetPath);
+                importedModel,
+                settings?.Uv0MaximumTextureDimension ?? BridgeSettings.DefaultUv0MaximumTextureDimension,
+                settings != null && settings.AllowFloat32Uv0Override);
+            foreach (BlenderUv0Preflight.ValidationResult result in uv0Results)
+            {
+                if (result.UsesFloat32Override)
+                {
+                    Debug.LogWarning(
+                        $"[Blender Bridge] '{result.MeshContext}' UV0 requires the explicit Float32 override: " +
+                        $"coordinate {result.LimitingCoordinateIndex} ({result.LimitingCoordinate.x:R}, " +
+                        $"{result.LimitingCoordinate.y:R}), {result.MaximumTexelError:F6} texel at " +
+                        $"{result.LimitingResolution.Width}x{result.LimitingResolution.Height} " +
+                        $"({result.LimitingResolution.Description}).");
+                }
+            }
             List<string> sourceObjectPaths = GetMeshObjectPaths(importedModel);
             string sourceGuid = AssetDatabase.AssetPathToGUID(sourceAssetPath);
             if (string.IsNullOrEmpty(sourceGuid))
@@ -133,8 +153,14 @@ namespace BlenderBridge.Editor
                     out Material fallbackMaterial,
                     out List<string> materialPaths);
 
+            string absolutePrefabPath = GetAbsoluteAssetPath(prefabPath);
+            bool prefabExistedBefore = File.Exists(absolutePrefabPath);
+            byte[] prefabBackup = prefabExistedBefore
+                ? File.ReadAllBytes(absolutePrefabPath)
+                : null;
             var metadataBackup = MetadataBackup.Capture(
                 AssetDatabase.LoadAssetAtPath<BlenderBakeMetadata>(metadataPath));
+            var meshAssetTransaction = new MeshAssetTransaction();
             try
             {
                 Scene previewScene = default(Scene);
@@ -147,15 +173,47 @@ namespace BlenderBridge.Editor
                         throw new InvalidOperationException("Could not stage the imported model for Prefab creation.");
 
                     bakeRoot.name = safeName;
+                    string meshesFolder = bakeFolder + "/Meshes";
+                    List<BlenderMeshOptimizer.MeshAssetRecord> optimizedMeshes =
+                        BlenderMeshOptimizer.CreatePersistentMeshes(
+                            bakeRoot,
+                            sourceAssetPath,
+                            meshesFolder,
+                            settings?.Uv0MaximumTextureDimension ?? BridgeSettings.DefaultUv0MaximumTextureDimension,
+                            settings != null && settings.AllowFloat32Uv0Override,
+                            meshAssetTransaction);
+                    foreach (BlenderMeshOptimizer.MeshAssetRecord optimizedMesh in optimizedMeshes)
+                    {
+                        Debug.Log(
+                            $"[Blender Bridge] Optimized '{optimizedMesh.HierarchyPath}' to " +
+                            $"{optimizedMesh.VertexFormat} UV0 (maximum reconstruction error " +
+                            $"{optimizedMesh.MaximumTexelError:F6} texel at " +
+                            $"{optimizedMesh.LimitingTextureWidth}x{optimizedMesh.LimitingTextureHeight}).");
+                    }
                     AssignMaterialsAndColliders(
                         bakeRoot,
                         materialMap,
                         fallbackMaterial,
                         settings?.ColliderPolicy ?? BridgeColliderPolicy.None);
+                    AssembleLodGroups(
+                        bakeRoot,
+                        lodPlans,
+                        settings?.Lod0Transition ?? BridgeSettings.DefaultLod0Transition,
+                        settings?.Lod1Transition ?? BridgeSettings.DefaultLod1Transition,
+                        settings?.Lod2Transition ?? BridgeSettings.DefaultLod2Transition);
 
                     PrefabUtility.SaveAsPrefabAsset(bakeRoot, prefabPath, out bool prefabSaved);
                     if (!prefabSaved || AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath) == null)
                         throw new IOException($"Unity did not save the baked Prefab at '{prefabPath}'.");
+                    AssetDatabase.ImportAsset(
+                        prefabPath,
+                        ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                    ValidateSavedLodGroups(prefabPath, lodPlans);
+                    BlenderMeshOptimizer.ValidateSavedMeshes(
+                        prefabPath,
+                        optimizedMeshes,
+                        settings?.Uv0MaximumTextureDimension ?? BridgeSettings.DefaultUv0MaximumTextureDimension,
+                        settings != null && settings.AllowFloat32Uv0Override);
                 }
                 finally
                 {
@@ -181,21 +239,57 @@ namespace BlenderBridge.Editor
                     GetMeshObjectLocalIds(importedModel),
                     materialPaths);
                 AssetDatabase.SaveAssets();
+                meshAssetTransaction.Commit();
             }
             catch (Exception bakeException)
             {
+                var rollbackExceptions = new List<Exception>();
+                try
+                {
+                    meshAssetTransaction.Rollback();
+                }
+                catch (Exception rollbackException)
+                {
+                    rollbackExceptions.Add(rollbackException);
+                }
+
                 try
                 {
                     metadataBackup.Restore(metadataPath);
                 }
                 catch (Exception rollbackException)
                 {
-                    throw new AggregateException(
-                        "The FBX bake failed and its metadata rollback also failed.",
-                        bakeException,
-                        rollbackException);
+                    rollbackExceptions.Add(rollbackException);
                 }
 
+                try
+                {
+                    if (prefabExistedBefore)
+                    {
+                        File.WriteAllBytes(absolutePrefabPath, prefabBackup);
+                        AssetDatabase.ImportAsset(
+                            prefabPath,
+                            ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                    }
+                    else if (File.Exists(absolutePrefabPath) &&
+                             !AssetDatabase.DeleteAsset(prefabPath) &&
+                             File.Exists(absolutePrefabPath))
+                    {
+                        throw new IOException($"Could not remove failed Prefab output '{prefabPath}'.");
+                    }
+                }
+                catch (Exception rollbackException)
+                {
+                    rollbackExceptions.Add(rollbackException);
+                }
+
+                if (rollbackExceptions.Count > 0)
+                {
+                    rollbackExceptions.Insert(0, bakeException);
+                    throw new AggregateException(
+                        "The FBX bake failed and one or more output rollbacks also failed.",
+                        rollbackExceptions);
+                }
                 throw;
             }
 
@@ -282,121 +376,14 @@ namespace BlenderBridge.Editor
                 StringComparison.OrdinalIgnoreCase);
         }
 
-        private static void ConfigureReferencedTextureColorSpaces(
-            string sourceAssetPath,
-            string outputFolder,
-            GameObject model)
-        {
-            var desiredSrgbByPath = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-            var desiredNormalMapByPath = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-            foreach (Material material in GetSourceMaterials(model))
-            {
-                AddTextureRole(material, desiredSrgbByPath, desiredNormalMapByPath, outputFolder, true, false,
-                    "_BaseMap", "_MainTex", "_ColorMap", "_EmissionMap");
-                AddTextureRole(material, desiredSrgbByPath, desiredNormalMapByPath, outputFolder, false, true,
-                    "_BumpMap", "_NormalMap");
-                AddTextureRole(material, desiredSrgbByPath, desiredNormalMapByPath, outputFolder, false, false,
-                    "_MetallicGlossMap", "_MetallicMap", "_RoughnessMap", "_OcclusionMap", "_MaskMap");
-            }
-
-            var reimportPaths = new List<string>();
-            foreach (KeyValuePair<string, bool> entry in desiredSrgbByPath)
-            {
-                if (string.Equals(entry.Key, sourceAssetPath, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidDataException(
-                        $"Texture '{entry.Key}' is embedded in the FBX; v1 requires staged external texture assets.");
-
-                TextureImporter importer = AssetImporter.GetAtPath(entry.Key) as TextureImporter;
-                if (importer == null)
-                    throw new InvalidDataException(
-                        $"Texture dependency '{entry.Key}' has no editable TextureImporter.");
-
-                bool desiredIsNormalMap = desiredNormalMapByPath[entry.Key];
-                TextureImporterType desiredTextureType = desiredIsNormalMap
-                    ? TextureImporterType.NormalMap
-                    : importer.textureType == TextureImporterType.NormalMap
-                        ? TextureImporterType.Default
-                        : importer.textureType;
-                bool hasPersistedNormalMapRole =
-                    BlenderFbxImportSettings.TryGetPersistedNormalMapRole(importer.userData, out bool persistedNormalMap);
-                if (importer.sRGBTexture != entry.Value ||
-                    !BlenderFbxImportSettings.TryGetPersistedTextureRole(importer.userData, out bool persistedRole) ||
-                    persistedRole != entry.Value ||
-                    importer.textureType != desiredTextureType ||
-                    !hasPersistedNormalMapRole ||
-                    persistedNormalMap != desiredIsNormalMap)
-                {
-                    importer.sRGBTexture = entry.Value;
-                    importer.textureType = desiredTextureType;
-                    importer.userData =
-                        BlenderFbxImportSettings.SetPersistedTextureRole(importer.userData, entry.Value);
-                    importer.userData =
-                        BlenderFbxImportSettings.SetPersistedNormalMapRole(importer.userData, desiredIsNormalMap);
-                    reimportPaths.Add(entry.Key);
-                }
-            }
-
-            for (int i = 0; i < reimportPaths.Count; i++)
-                AssetDatabase.ImportAsset(reimportPaths[i], ImportAssetOptions.ForceSynchronousImport);
-        }
-
-        private static void AddTextureRole(
-            Material material,
-            Dictionary<string, bool> desiredSrgbByPath,
-            Dictionary<string, bool> desiredNormalMapByPath,
-            string outputFolder,
-            bool isSrgb,
-            bool isNormalMap,
-            params string[] properties)
-        {
-            if (material == null)
-                return;
-
-            for (int i = 0; i < properties.Length; i++)
-            {
-                string property = properties[i];
-                if (!material.HasProperty(property))
-                    continue;
-
-                Texture texture = material.GetTexture(property);
-                if (texture == null)
-                    continue;
-
-                string path = AssetDatabase.GetAssetPath(texture);
-                if (string.IsNullOrEmpty(path))
-                    continue;
-                if (!BlenderFbxImportSettings.IsUnderOutputFolder(path, outputFolder))
-                {
-                    throw new InvalidDataException(
-                        $"Texture dependency '{path}' is outside the configured Blender Bridge output folder '{outputFolder}'.");
-                }
-
-                if (desiredSrgbByPath.TryGetValue(path, out bool previous) && previous != isSrgb)
-                {
-                    throw new InvalidDataException(
-                        $"Texture '{path}' is used as both colour and linear data. Use separate texture assets for those roles.");
-                }
-                if (desiredNormalMapByPath.TryGetValue(path, out bool previousNormalMap) &&
-                    previousNormalMap != isNormalMap)
-                {
-                    throw new InvalidDataException(
-                        $"Texture '{path}' is used as both a normal map and another data map. Use separate texture assets for those roles.");
-                }
-
-                desiredSrgbByPath[path] = isSrgb;
-                desiredNormalMapByPath[path] = isNormalMap;
-            }
-        }
-
         private static void ValidateStaticModel(GameObject model)
         {
             if (model.GetComponentInChildren<SkinnedMeshRenderer>(true) != null ||
                 model.GetComponentInChildren<Animator>(true) != null ||
-                model.GetComponentInChildren<Animation>(true) != null ||
-                model.GetComponentInChildren<LODGroup>(true) != null)
+                model.GetComponentInChildren<Animation>(true) != null)
             {
                 throw new InvalidDataException(
-                    "This v1 FBX bake supports static meshes only; rigged, animated, and LOD content is unsupported.");
+                    "This v1 FBX bake supports static meshes only; rigged or animated content is unsupported.");
             }
 
             MeshRenderer[] renderers = model.GetComponentsInChildren<MeshRenderer>(true);
@@ -415,6 +402,343 @@ namespace BlenderBridge.Editor
                     throw new InvalidDataException(
                         $"Static renderer '{GetHierarchyPath(renderer.transform, model.transform)}' has no imported mesh.");
                 }
+            }
+        }
+
+        private static List<LodGroupPlan> PreflightLods(string sourceAssetPath, GameObject model)
+        {
+            string manifestPath = GetAbsoluteAssetPath(sourceAssetPath) + ".lod.json";
+            if (!File.Exists(manifestPath))
+            {
+                if (ContainsLodMarkers(model))
+                {
+                    throw new InvalidDataException(
+                        $"FBX '{sourceAssetPath}' contains LOD hierarchy nodes but has no required sidecar '{Path.GetFileName(manifestPath)}'.");
+                }
+                return new List<LodGroupPlan>();
+            }
+
+            BlenderLodManifest manifest;
+            try
+            {
+                manifest = JsonUtility.FromJson<BlenderLodManifest>(File.ReadAllText(manifestPath));
+            }
+            catch (Exception exception) when (
+                exception is ArgumentException ||
+                exception is IOException ||
+                exception is FormatException)
+            {
+                throw new InvalidDataException(
+                    $"Could not read LOD manifest '{manifestPath}': {exception.Message}",
+                    exception);
+            }
+
+            return ValidateLodManifest(sourceAssetPath, model, manifest, manifestPath);
+        }
+
+        internal static List<LodGroupPlan> ValidateLodManifestForTests(
+            string sourceAssetPath,
+            GameObject model,
+            BlenderLodManifest manifest)
+        {
+            return ValidateLodManifest(
+                sourceAssetPath,
+                model,
+                manifest,
+                sourceAssetPath + ".lod.json");
+        }
+
+        private static List<LodGroupPlan> ValidateLodManifest(
+            string sourceAssetPath,
+            GameObject model,
+            BlenderLodManifest manifest,
+            string manifestPath)
+        {
+            if (model.GetComponentInChildren<LODGroup>(true) != null)
+            {
+                throw new InvalidDataException(
+                    $"FBX '{sourceAssetPath}' contains a native Unity LODGroup; Blender Bridge accepts only its named sidecar-backed hierarchy.");
+            }
+
+            if (manifest == null ||
+                manifest.schemaVersion != 1 ||
+                !string.Equals(manifest.fbxFile, Path.GetFileName(sourceAssetPath), StringComparison.Ordinal) ||
+                !string.Equals(manifest.coordinateSpace, "source-root-local", StringComparison.Ordinal) ||
+                manifest.lodSets == null ||
+                manifest.lodSets.Length == 0)
+            {
+                throw new InvalidDataException(
+                    $"LOD manifest '{manifestPath}' has an unsupported schema or incomplete FBX contract.");
+            }
+
+            var expectedGroups = new HashSet<string>(StringComparer.Ordinal);
+            var sourceIds = new HashSet<string>(StringComparer.Ordinal);
+            var plans = new List<LodGroupPlan>(manifest.lodSets.Length);
+            Transform[] allTransforms = model.GetComponentsInChildren<Transform>(true);
+            var discoveredGroups = allTransforms
+                .Where(transform => transform.name.EndsWith("_LODGroup", StringComparison.Ordinal))
+                .ToArray();
+            if (discoveredGroups.Length != manifest.lodSets.Length)
+            {
+                throw new InvalidDataException(
+                    $"FBX '{sourceAssetPath}' has {discoveredGroups.Length} LOD group nodes but its manifest declares {manifest.lodSets.Length}.");
+            }
+
+            foreach (BlenderLodSetManifest lodSet in manifest.lodSets)
+            {
+                if (lodSet == null ||
+                    string.IsNullOrWhiteSpace(lodSet.sourceName) ||
+                    !Guid.TryParse(lodSet.sourceId, out _) ||
+                    string.IsNullOrWhiteSpace(lodSet.groupName) ||
+                    lodSet.levels == null ||
+                    lodSet.levels.Length == 0 ||
+                    !sourceIds.Add(lodSet.sourceId) ||
+                    !expectedGroups.Add(lodSet.groupName))
+                {
+                    throw new InvalidDataException(
+                        $"LOD manifest '{manifestPath}' contains an empty, duplicate, or invalid LOD set.");
+                }
+
+                Transform[] matches = allTransforms
+                    .Where(transform => string.Equals(transform.name, lodSet.groupName, StringComparison.Ordinal))
+                    .ToArray();
+                if (matches.Length != 1)
+                {
+                    throw new InvalidDataException(
+                        $"FBX '{sourceAssetPath}' must contain exactly one group named '{lodSet.groupName}', found {matches.Length}.");
+                }
+
+                Transform group = matches[0];
+                if (group.parent != model.transform)
+                {
+                    throw new InvalidDataException(
+                        $"LOD group '{lodSet.groupName}' must be a direct child of FBX root '{model.name}'.");
+                }
+                var levelPlans = new List<LodLevelPlan>(lodSet.levels.Length);
+                var expectedNodes = new HashSet<string>(StringComparer.Ordinal);
+                var seenLevels = new HashSet<int>();
+                int previousImportedTriangles = int.MaxValue;
+                foreach (BlenderLodLevelManifest level in lodSet.levels
+                    .OrderBy(item => item == null ? -1 : item.level))
+                {
+                    if (level == null ||
+                        level.level < 0 ||
+                        level.level > 3 ||
+                        !seenLevels.Add(level.level) ||
+                        !string.Equals(
+                            level.nodeName,
+                            lodSet.groupName + "_LOD" + level.level,
+                            StringComparison.Ordinal) ||
+                        string.IsNullOrWhiteSpace(level.meshName) ||
+                        string.IsNullOrWhiteSpace(level.assignedObjectName) ||
+                        level.triangleCap <= 0 ||
+                        level.triangleCount <= 0 ||
+                        level.vertexCount <= 0)
+                    {
+                        throw new InvalidDataException(
+                            $"LOD set '{lodSet.groupName}' contains malformed or duplicate level metadata.");
+                    }
+
+                    expectedNodes.Add(level.nodeName);
+                    Transform node = FindUniqueDirectChild(group, level.nodeName);
+                    MeshRenderer[] renderers = node.GetComponentsInChildren<MeshRenderer>(true);
+                    if (renderers.Length != 1 ||
+                        !string.Equals(renderers[0].gameObject.name, level.meshName, StringComparison.Ordinal))
+                    {
+                        string foundRenderer = renderers.Length == 1
+                            ? "'" + renderers[0].gameObject.name + "'"
+                            : renderers.Length.ToString() + " renderers";
+                        throw new InvalidDataException(
+                            $"LOD node '{lodSet.groupName}/{level.nodeName}' for assigned mesh '{level.assignedObjectName}' must contain exactly one renderer named '{level.meshName}'; found {foundRenderer}.");
+                    }
+
+                    MeshFilter filter = renderers[0].GetComponent<MeshFilter>();
+                    if (filter == null || filter.sharedMesh == null)
+                    {
+                        throw new InvalidDataException(
+                            $"LOD node '{lodSet.groupName}/{level.nodeName}' for assigned mesh '{level.assignedObjectName}' has no imported mesh.");
+                    }
+
+                    int importedTriangles = CountImportedTriangles(
+                        filter.sharedMesh,
+                        sourceAssetPath,
+                        lodSet.groupName,
+                        level.level);
+                    if (importedTriangles <= 0 || importedTriangles > level.triangleCap)
+                    {
+                        throw new InvalidDataException(
+                            $"FBX '{sourceAssetPath}', LOD set '{lodSet.groupName}', assigned mesh '{level.assignedObjectName}' ('{level.meshName}'), LOD{level.level} imported {importedTriangles} triangles; cap is {level.triangleCap}.");
+                    }
+                    if (importedTriangles >= previousImportedTriangles)
+                    {
+                        throw new InvalidDataException(
+                            $"FBX '{sourceAssetPath}', LOD set '{lodSet.groupName}', assigned mesh '{level.assignedObjectName}', LOD{level.level} imported {importedTriangles} triangles, which is not lower than the previous emitted level's {previousImportedTriangles}.");
+                    }
+                    previousImportedTriangles = importedTriangles;
+
+                    levelPlans.Add(new LodLevelPlan
+                    {
+                        Level = level.level,
+                        NodeName = level.nodeName
+                    });
+                }
+
+                Transform[] actualLodNodes = group.Cast<Transform>().ToArray();
+                if (actualLodNodes.Length != expectedNodes.Count ||
+                    actualLodNodes.Any(child => !expectedNodes.Contains(child.name)) ||
+                    group.GetComponentsInChildren<MeshRenderer>(true).Length != levelPlans.Count)
+                {
+                    throw new InvalidDataException(
+                        $"LOD set '{lodSet.groupName}' contains missing, duplicate, or undeclared LOD nodes/renderers.");
+                }
+
+                levelPlans.Sort((left, right) => left.Level.CompareTo(right.Level));
+                plans.Add(new LodGroupPlan
+                {
+                    GroupName = lodSet.groupName,
+                    Levels = levelPlans.ToArray()
+                });
+            }
+
+            if (discoveredGroups.Any(group => !expectedGroups.Contains(group.name)))
+            {
+                throw new InvalidDataException(
+                    $"FBX '{sourceAssetPath}' contains an LOD group not declared in its manifest.");
+            }
+            return plans;
+        }
+
+        private static bool ContainsLodMarkers(GameObject model)
+        {
+            return model.GetComponentInChildren<LODGroup>(true) != null ||
+                   model.GetComponentsInChildren<Transform>(true).Any(transform =>
+                transform.name.EndsWith("_LODGroup", StringComparison.Ordinal) ||
+                transform.name.StartsWith("LOD", StringComparison.Ordinal));
+        }
+
+        private static Transform FindUniqueDirectChild(Transform parent, string childName)
+        {
+            Transform match = null;
+            foreach (Transform child in parent)
+            {
+                if (!string.Equals(child.name, childName, StringComparison.Ordinal))
+                    continue;
+                if (match != null)
+                    throw new InvalidDataException(
+                        $"LOD group '{parent.name}' has duplicate child nodes named '{childName}'.");
+                match = child;
+            }
+
+            if (match == null)
+                throw new InvalidDataException(
+                    $"LOD group '{parent.name}' is missing child node '{childName}'.");
+            return match;
+        }
+
+        private static int CountImportedTriangles(
+            Mesh mesh,
+            string sourceAssetPath,
+            string lodSetName,
+            int level)
+        {
+            long triangleCount = 0;
+            for (int submesh = 0; submesh < mesh.subMeshCount; submesh++)
+            {
+                if (mesh.GetTopology(submesh) != MeshTopology.Triangles)
+                {
+                    throw new InvalidDataException(
+                        $"FBX '{sourceAssetPath}', LOD set '{lodSetName}', LOD{level} contains non-triangle topology.");
+                }
+                triangleCount += mesh.GetIndexCount(submesh) / 3;
+            }
+
+            if (triangleCount > int.MaxValue)
+                throw new InvalidDataException(
+                    $"FBX '{sourceAssetPath}', LOD set '{lodSetName}', LOD{level} exceeds supported triangle-count range.");
+            return (int)triangleCount;
+        }
+
+        internal static void AssembleLodGroups(
+            GameObject root,
+            List<LodGroupPlan> plans,
+            float lod0Transition,
+            float lod1Transition,
+            float lod2Transition)
+        {
+            float[] transitions = { lod0Transition, lod1Transition, lod2Transition };
+            foreach (LodGroupPlan plan in plans)
+            {
+                if (plan.Levels.Length == 1)
+                    continue;
+                Transform[] groupMatches = root.GetComponentsInChildren<Transform>(true)
+                    .Where(transform => string.Equals(transform.name, plan.GroupName, StringComparison.Ordinal))
+                    .ToArray();
+                if (groupMatches.Length != 1)
+                    throw new InvalidDataException(
+                        $"Baked model must contain exactly one LOD group root named '{plan.GroupName}'.");
+
+                LODGroup group = groupMatches[0].GetComponent<LODGroup>();
+                if (group == null)
+                    group = groupMatches[0].gameObject.AddComponent<LODGroup>();
+                var lods = new LOD[plan.Levels.Length];
+                for (int index = 0; index < plan.Levels.Length; index++)
+                {
+                    LodLevelPlan level = plan.Levels[index];
+                    Transform node = FindUniqueDirectChild(group.transform, level.NodeName);
+                    Renderer[] renderers = node.GetComponentsInChildren<MeshRenderer>(true);
+                    if (renderers.Length != 1)
+                        throw new InvalidDataException(
+                            $"Baked LOD node '{plan.GroupName}/LOD{level.Level}' no longer has exactly one renderer.");
+                    float threshold = level.Level < transitions.Length ? transitions[level.Level] : 0f;
+                    level.Transition = threshold;
+                    lods[index] = new LOD(threshold, renderers);
+                }
+
+                group.SetLODs(lods);
+                group.RecalculateBounds();
+                if (float.IsNaN(group.size) || float.IsInfinity(group.size) || group.size <= 0f)
+                    throw new InvalidDataException(
+                        $"LOD group '{plan.GroupName}' has invalid or empty renderer bounds.");
+            }
+        }
+
+        private static void ValidateSavedLodGroups(string prefabPath, List<LodGroupPlan> plans)
+        {
+            GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+            if (prefab == null)
+                throw new InvalidDataException($"Could not reload baked Prefab '{prefabPath}'.");
+
+            LODGroup[] groups = prefab.GetComponentsInChildren<LODGroup>(true);
+            int expectedGroupCount = plans.Count(plan => plan.Levels.Length > 1);
+            if (groups.Length != expectedGroupCount)
+                throw new InvalidDataException(
+                    $"Saved Prefab '{prefabPath}' contains {groups.Length} LODGroups; expected {expectedGroupCount}.");
+
+            foreach (LodGroupPlan plan in plans)
+            {
+                if (plan.Levels.Length == 1)
+                    continue;
+                LODGroup[] matches = groups.Where(group =>
+                    string.Equals(group.gameObject.name, plan.GroupName, StringComparison.Ordinal)).ToArray();
+                if (matches.Length != 1 || matches[0].GetLODs().Length != plan.Levels.Length)
+                    throw new InvalidDataException(
+                        $"Saved Prefab '{prefabPath}' did not preserve LOD group '{plan.GroupName}' and its {plan.Levels.Length} levels.");
+                LOD[] lods = matches[0].GetLODs();
+                for (int index = 0; index < lods.Length; index++)
+                {
+                    if (lods[index].renderers == null ||
+                        lods[index].renderers.Length != 1 ||
+                        !Mathf.Approximately(
+                            lods[index].screenRelativeTransitionHeight,
+                            plan.Levels[index].Transition))
+                        throw new InvalidDataException(
+                            $"Saved Prefab '{prefabPath}' has an invalid transition or renderer set for '{plan.GroupName}' LOD{plan.Levels[index].Level}.");
+                }
+                if (float.IsNaN(matches[0].size) ||
+                    float.IsInfinity(matches[0].size) ||
+                    matches[0].size <= 0f)
+                    throw new InvalidDataException(
+                        $"Saved Prefab '{prefabPath}' has invalid bounds for LOD group '{plan.GroupName}'.");
             }
         }
 

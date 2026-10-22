@@ -73,12 +73,27 @@ The live connection is for previews in the Unity Editor. It does not itself crea
 
 The Unity bake creates a Prefab and materials under the configured Blender Bridge output folder. This export workflow supports static meshes; it does not bake animation.
 
+## Bake LODs into a Unity Prefab
+
+![Open Unity Assets menu](images/bake_fbx_to_prefab.jpg)
+
+Blender exports the LOD meshes as an FBX hierarchy and writes a matching `.fbx.lod.json` sidecar. Importing the FBX by itself does **not** add Unity's `LODGroup` component. Use the Unity Prefab bake to validate the LOD data and assemble the component:
+
+1. In Blender, make the source/root mesh active and assign the meshes you want to use in its **LOD0–LOD3** fields. Each assigned mesh should be a lower-detail version of the previous level and spatially aligned with it. Only assigned levels are exported.
+2. Start live updates, set the output path, and click **Bake to Unity** as described above. Keep the generated `.fbx.lod.json` sidecar next to the FBX.
+3. In Unity's **Project** window, select the imported FBX asset and choose **Assets > Blender Bridge > Bake FBX To Prefab**. Do not select the hierarchy instance for this command.
+4. Use the generated Prefab from the output folder's `Baked` subfolder. Inside it, the empty `<source name>_LODGroup` object has the `LODGroup` component; its LOD children supply the renderers for each level. Drag this Prefab into your scene.
+
+You do not need to add or configure the component manually when using the Prefab bake. If you use the imported FBX hierarchy directly without baking a Prefab, the named `<source name>_LODGroup` object is only a transform; add an `LODGroup` component and assign each level's renderers yourself. A set with only one assigned level remains a normal static renderer and does not get an `LODGroup`.
+
+LOD transitions are based on screen-relative size, not fixed camera distances. The provisional defaults are `0.6`, `0.3`, and `0.1` after LOD0, LOD1, and LOD2; tune these in the Blender Bridge Settings asset and test with your camera and assets.
+
 ## Limitations
 
 - Scene and asset updates flow from Blender to Unity only. Unity-side scene edits are not synchronized back to Blender. Unity can send bridge control requests, such as requesting a resync, but this does not provide bidirectional editing.
 - Only one Blender connection can be active with a Unity Editor instance at a time.
 - FBX baking is limited to static meshes. Rigged or animated meshes, shape keys, and meshes with armature, curve, or particle-system modifiers are not supported by the bake workflow. Save the Blender file before baking.
-- The Blender **Bake to Unity** action exports an FBX; Unity must import that FBX and run **Bake FBX To Prefab** separately to create the Prefab and materials.
+- The Blender **Bake to Unity** action exports an FBX; Unity must import that FBX and run **Bake FBX To Prefab** separately to create the Prefab and materials (and assemble any supported multi-level LODGroups).
 
 ## Roadmap
 
