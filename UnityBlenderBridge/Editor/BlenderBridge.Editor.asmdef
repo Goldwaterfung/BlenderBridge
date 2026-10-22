@@ -1,0 +1,18 @@
+{
+  "name": "BlenderBridge.Editor",
+  "rootNamespace": "BlenderBridge.Editor",
+  "references": [
+    "BlenderBridge.Runtime"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
