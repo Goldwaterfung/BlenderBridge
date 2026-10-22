@@ -4,9 +4,7 @@
 
 Blender Bridge connects Blender to the Unity Editor for live mesh and material previews, and can export selected static meshes as FBX files into a Unity project. Unity imports those FBX files and can bake them into reusable Prefabs with materials.
 
-<video controls width="100%" preload="metadata">
-  <source src="images/showcase.mp4" type="video/mp4">
-</video>
+![Blender Bridge showcase](images/showcase.gif)
 
 ## Requirements
 

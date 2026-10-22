@@ -4,9 +4,7 @@
 
 Blender Bridge 可將 Blender 連接至 Unity 編輯器，提供即時網格與材質預覽，也能將選取的靜態網格匯出為 FBX 檔案至 Unity 專案。Unity 匯入 FBX 後，可將其烘焙成可重複使用、包含材質的 Prefab。
 
-<video controls width="100%" preload="metadata">
-  <source src="images/showcase.mp4" type="video/mp4">
-</video>
+![Blender Bridge 操作示範](images/showcase.gif)
 
 ## 系統需求
 
