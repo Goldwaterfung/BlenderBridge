@@ -4,10 +4,8 @@
 
 Blender Bridge connects Blender to the Unity Editor for live mesh and material previews, and can export selected static meshes as FBX files into a Unity project. Unity imports those FBX files and can bake them into reusable Prefabs with materials.
 
-## Showcase
-
-<video src="images/showcase.mp4" controls width="100%">
-  <a href="images/showcase.mp4">Blender Bridge showcase</a>
+<video controls width="100%" preload="metadata">
+  <source src="images/showcase.mp4" type="video/mp4">
 </video>
 
 ## Requirements
@@ -108,6 +106,5 @@ By default, Unity listens on port `8191` and uses `Assets/Art/Blender` as the ou
 
 - `UnityBlenderBridge/` — Unity runtime and Editor integration.
 - `BlenderBridge-addon.zip` — installable Blender add-on.
-- `images/showcase.mp4` — Blender Bridge showcase video.
 - `images/` — installation and usage screenshots in this guide.
 - `blender_bridge/LICENSE` — MIT license.
